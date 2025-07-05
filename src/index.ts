@@ -57,11 +57,14 @@ export default {
   <meta charset="utf-8">
   <title>${cachedData.title || 'Page Title'}</title>
 
+  <!-- Facebook App ID -->
+  ${cachedData.fbAppId ? `<meta property="fb:app_id" content="${cachedData.fbAppId}">` : ''}
+
   <!-- Open Graph meta tags -->
   <meta property="og:title" content="${cachedData.title || ''}">
   <meta property="og:description" content="${cachedData.description || ''}">
   <meta property="og:image" content="${cachedData.image || ''}">
-  <meta property="og:url" content="${cachedData.url || reqUrl}">
+  <meta property="og:url" content="${reqUrl}">
   <meta property="og:type" content="${cachedData.type || 'website'}">
   ${cachedData.siteName ? `<meta property="og:site_name" content="${cachedData.siteName}">` : ''}
   ${cachedData.locale ? `<meta property="og:locale" content="${cachedData.locale}">` : ''}
@@ -118,9 +121,13 @@ export default {
     const page = await browser.newPage();
 
     try {
-      // Set timeout and wait for page to load
-      await page.setDefaultTimeout(10000);
-      const response = await page.goto(reqUrl, { waitUntil: 'domcontentloaded' });
+      // Set timeout and User-Agent for better compatibility
+      await page.setDefaultTimeout(15000);
+      await page.setUserAgent('Mozilla/5.0 (compatible; OGBot/1.0; +https://ogbot.com)');
+      const response = await page.goto(reqUrl, { waitUntil: 'networkidle2' });
+
+      // Additional wait for dynamic content to load
+      await new Promise(resolve => setTimeout(resolve, 2000));
 
       if (!response) {
         throw new Error('Failed to load page: No response received');
@@ -152,6 +159,9 @@ export default {
           result.type = getMeta('og:type') || 'website';
           result.siteName = getMeta('og:site_name') || null;
           result.locale = getMeta('og:locale') || null;
+
+          // Facebook app_id
+          result.fbAppId = getMeta('fb:app_id') || null;
 
           // Twitter meta data
           result.twitterCard = getMeta('twitter:card') || null;
@@ -208,11 +218,14 @@ export default {
   <meta charset="utf-8">
   <title>${ogData.title || 'Page Title'}</title>
 
+  <!-- Facebook App ID -->
+  ${ogData.fbAppId ? `<meta property="fb:app_id" content="${ogData.fbAppId}">` : ''}
+
   <!-- Open Graph meta tags -->
   <meta property="og:title" content="${ogData.title || ''}">
   <meta property="og:description" content="${ogData.description || ''}">
   <meta property="og:image" content="${ogData.image || ''}">
-  <meta property="og:url" content="${ogData.url || reqUrl}">
+  <meta property="og:url" content="${reqUrl}">
   <meta property="og:type" content="${ogData.type || 'website'}">
   ${ogData.siteName ? `<meta property="og:site_name" content="${ogData.siteName}">` : ''}
   ${ogData.locale ? `<meta property="og:locale" content="${ogData.locale}">` : ''}
