@@ -30,7 +30,7 @@ This Worker solves that problem by:
 
 1. Clone this repository:
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/7a6163/browser-worker.git
 cd browser-worker
 ```
 
@@ -251,7 +251,7 @@ For issues and questions:
 
 ---
 
-**Version**: 1.0.0  
-**Last Updated**: 2025-07-05  
-**Cloudflare Workers**: Compatible  
+**Version**: 1.0.0
+**Last Updated**: 2025-07-05
+**Cloudflare Workers**: Compatible
 **Browser Rendering**: Required
