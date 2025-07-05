@@ -75,13 +75,11 @@ export default {
   <!-- Standard meta tags -->
   <meta name="description" content="${cachedData.description || ''}">
 
-  <!-- Redirect to original URL after a short delay -->
-  <meta http-equiv="refresh" content="0;url=${reqUrl}">
+  <!-- No redirect needed for crawlers -->
 </head>
 <body>
   <h1>${cachedData.title || 'Loading...'}</h1>
-  <p>${cachedData.description || 'Redirecting to original page...'}</p>
-  <p><a href="${reqUrl}">Click here if you are not redirected automatically</a></p>
+  <p>${cachedData.description || 'Open Graph data loaded from cache'}</p>
 
   <!-- Debug info (hidden) -->
   <!-- Cached data -->
@@ -228,13 +226,11 @@ export default {
   <!-- Standard meta tags -->
   <meta name="description" content="${ogData.description || ''}">
 
-  <!-- Redirect to original URL after a short delay -->
-  <meta http-equiv="refresh" content="0;url=${reqUrl}">
+  <!-- No redirect needed for crawlers -->
 </head>
 <body>
   <h1>${ogData.title || 'Loading...'}</h1>
-  <p>${ogData.description || 'Redirecting to original page...'}</p>
-  <p><a href="${reqUrl}">Click here if you are not redirected automatically</a></p>
+  <p>${ogData.description || 'Open Graph data extracted successfully'}</p>
 
   <!-- Debug info (hidden) -->
   <!-- Session: ${sessionId} -->

@@ -4,16 +4,19 @@
 	"private": true,
 	"scripts": {
 		"deploy": "wrangler deploy",
-		"dev": "wrangler dev",
-		"start": "wrangler dev",
+		"dev": "wrangler dev --remote",
+		"start": "wrangler dev --remote",
 		"test": "vitest",
 		"cf-typegen": "wrangler types"
 	},
 	"devDependencies": {
-		"@cloudflare/puppeteer": "^0.0.11",
-		"@cloudflare/vitest-pool-workers": "^0.8.19",
+		"@cloudflare/puppeteer": "^1.0.3",
+		"@cloudflare/vitest-pool-workers": "^0.8.49",
 		"typescript": "^5.5.2",
 		"vitest": "~3.2.0",
 		"wrangler": "^4.23.0"
+	},
+	"dependencies": {
+		"@puppeteer/browsers": "^2.10.5"
 	}
 }
