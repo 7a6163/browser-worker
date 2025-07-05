@@ -2,6 +2,7 @@ import puppeteer from "@cloudflare/puppeteer";
 
 interface Env {
   MYBROWSER: Fetcher;
+  OG_CACHE?: KVNamespace; // Optional KV store for caching OG data
 }
 
 export default {
@@ -10,6 +11,92 @@ export default {
     let reqUrl = url.searchParams.get("url") || "https://example.com";
     reqUrl = new URL(reqUrl).toString(); // normalize
 
+    // Generate cache key based on URL
+    const cacheKey = `og:${btoa(reqUrl).replace(/[^a-zA-Z0-9]/g, '')}`;
+
+    // Check cache first (if KV is available)
+    let cachedData = null;
+    if (env.OG_CACHE) {
+      try {
+        const cached = await env.OG_CACHE.get(cacheKey);
+        if (cached) {
+          cachedData = JSON.parse(cached);
+          console.log(`Cache hit for ${reqUrl}`);
+        }
+      } catch (e) {
+        console.log(`Cache read error: ${e}`);
+      }
+    }
+
+    // If we have cached data, use it
+    if (cachedData) {
+      const acceptHeader = request.headers.get('accept') || '';
+      const wantsJson = acceptHeader.includes('application/json') || url.searchParams.get('format') === 'json';
+
+      if (wantsJson) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            url: reqUrl,
+            sessionInfo: "From cache",
+            data: cachedData,
+            cached: true
+          }, null, 2),
+          {
+            headers: {
+              "content-type": "application/json",
+              "access-control-allow-origin": "*",
+              "cache-control": "public, max-age=3600", // 1 hour for cached data
+            },
+          },
+        );
+      } else {
+        const htmlContent = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${cachedData.title || 'Page Title'}</title>
+
+  <!-- Open Graph meta tags -->
+  <meta property="og:title" content="${cachedData.title || ''}">
+  <meta property="og:description" content="${cachedData.description || ''}">
+  <meta property="og:image" content="${cachedData.image || ''}">
+  <meta property="og:url" content="${cachedData.url || reqUrl}">
+  <meta property="og:type" content="${cachedData.type || 'website'}">
+  ${cachedData.siteName ? `<meta property="og:site_name" content="${cachedData.siteName}">` : ''}
+  ${cachedData.locale ? `<meta property="og:locale" content="${cachedData.locale}">` : ''}
+
+  <!-- Twitter Card meta tags -->
+  ${cachedData.twitterCard ? `<meta name="twitter:card" content="${cachedData.twitterCard}">` : ''}
+  ${cachedData.twitterImage ? `<meta name="twitter:image" content="${cachedData.twitterImage}">` : ''}
+  ${cachedData.twitterTitle ? `<meta name="twitter:title" content="${cachedData.twitterTitle}">` : ''}
+  ${cachedData.twitterDescription ? `<meta name="twitter:description" content="${cachedData.twitterDescription}">` : ''}
+
+  <!-- Standard meta tags -->
+  <meta name="description" content="${cachedData.description || ''}">
+
+  <!-- Redirect to original URL after a short delay -->
+  <meta http-equiv="refresh" content="0;url=${reqUrl}">
+</head>
+<body>
+  <h1>${cachedData.title || 'Loading...'}</h1>
+  <p>${cachedData.description || 'Redirecting to original page...'}</p>
+  <p><a href="${reqUrl}">Click here if you are not redirected automatically</a></p>
+
+  <!-- Debug info (hidden) -->
+  <!-- Cached data -->
+</body>
+</html>`;
+        return new Response(htmlContent, {
+          headers: {
+            "content-type": "text/html;charset=UTF-8",
+            "cache-control": "public, max-age=3600", // 1 hour for cached data
+          },
+        });
+      }
+    }
+
+    // No cache hit, proceed with browser rendering
     // Pick random session from open sessions
     let sessionId = await this.getRandomSession(env.MYBROWSER);
     let browser, launched;
@@ -80,6 +167,18 @@ export default {
 
       // All work done, so free connection (IMPORTANT!)
       browser.disconnect();
+
+      // Cache the extracted OG data (if KV is available)
+      if (env.OG_CACHE) {
+        try {
+          await env.OG_CACHE.put(cacheKey, JSON.stringify(ogData), {
+            expirationTtl: 3600, // Cache for 1 hour
+          });
+          console.log(`Cached OG data for ${reqUrl}`);
+        } catch (e) {
+          console.log(`Cache write error: ${e}`);
+        }
+      }
 
       // Check if request wants JSON (for debugging) or HTML (for Facebook)
       const acceptHeader = request.headers.get('accept') || '';
