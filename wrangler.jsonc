@@ -16,7 +16,7 @@
 	},
 	"kv_namespaces": [
 		{
-			"binding": "OG_CACHE",
+			"binding": "HTML_CACHE",
 			"id": "your-kv-namespace-id",
 			"preview_id": "your-preview-kv-namespace-id"
 		}
@@ -38,7 +38,9 @@
 	 * Environment Variables
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 */
-	// "vars": { "MY_VARIABLE": "production_value" },
+	// "vars": {
+	// 	"CUSTOM_USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	// },
 	/**
 	 * Note: Use secrets to store sensitive data.
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
