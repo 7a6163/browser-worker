@@ -1,275 +1,226 @@
 import puppeteer from "@cloudflare/puppeteer";
 
+// Global session cache to reuse across requests
+const sessionCache = new Map<string, { sessionId: string; lastUsed: number; inUse: boolean }>();
+const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+const MAX_SESSIONS = 5; // Maximum concurrent sessions to maintain
+
 interface Env {
   MYBROWSER: Fetcher;
-  OG_CACHE?: KVNamespace; // Optional KV store for caching OG data
+  HTML_CACHE?: KVNamespace; // Optional KV store for caching HTML content
+}
+
+interface SessionInfo {
+  sessionId: string;
+  lastUsed: number;
+  inUse: boolean;
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    let reqUrl = url.searchParams.get("url") || "https://example.com";
-    reqUrl = new URL(reqUrl).toString(); // normalize
-
-    // Generate cache key based on URL
-    const cacheKey = `og:${btoa(reqUrl).replace(/[^a-zA-Z0-9]/g, '')}`;
-
-    // Check cache first (if KV is available)
-    let cachedData = null;
-    if (env.OG_CACHE) {
-      try {
-        const cached = await env.OG_CACHE.get(cacheKey);
-        if (cached) {
-          cachedData = JSON.parse(cached);
-          console.log(`Cache hit for ${reqUrl}`);
-        }
-      } catch (e) {
-        console.log(`Cache read error: ${e}`);
-      }
+    
+    // Handle CORS preflight requests
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        headers: {
+          "access-control-allow-origin": "*",
+          "access-control-allow-methods": "GET, OPTIONS",
+          "access-control-allow-headers": "Content-Type",
+        },
+      });
     }
-
-    // If we have cached data, use it
-    if (cachedData) {
-      const acceptHeader = request.headers.get('accept') || '';
-      const wantsJson = acceptHeader.includes('application/json') || url.searchParams.get('format') === 'json';
-
-      if (wantsJson) {
+    
+    // Handle GET requests to /content/{target_url}
+    if (request.method === 'GET' && url.pathname.startsWith('/content/')) {
+      // Extract the target URL from the path
+      const targetUrl = url.pathname.substring('/content/'.length);
+      
+      if (!targetUrl) {
         return new Response(
           JSON.stringify({
-            success: true,
-            url: reqUrl,
-            sessionInfo: "From cache",
-            data: cachedData,
-            cached: true
-          }, null, 2),
+            success: false,
+            error: "Missing target URL in path. Usage: /content/https://example.com",
+          }),
           {
+            status: 400,
             headers: {
               "content-type": "application/json",
               "access-control-allow-origin": "*",
-              "cache-control": "public, max-age=3600", // 1 hour for cached data
             },
           },
         );
-      } else {
-        const htmlContent = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>${cachedData.title || 'Page Title'}</title>
-
-  <!-- Facebook App ID -->
-  ${cachedData.fbAppId ? `<meta property="fb:app_id" content="${cachedData.fbAppId}">` : ''}
-
-  <!-- Open Graph meta tags -->
-  <meta property="og:title" content="${cachedData.title || ''}">
-  <meta property="og:description" content="${cachedData.description || ''}">
-  <meta property="og:image" content="${cachedData.image || ''}">
-  <meta property="og:url" content="${reqUrl}">
-  <meta property="og:type" content="${cachedData.type || 'website'}">
-  ${cachedData.siteName ? `<meta property="og:site_name" content="${cachedData.siteName}">` : ''}
-  ${cachedData.locale ? `<meta property="og:locale" content="${cachedData.locale}">` : ''}
-
-  <!-- Twitter Card meta tags -->
-  ${cachedData.twitterCard ? `<meta name="twitter:card" content="${cachedData.twitterCard}">` : ''}
-  ${cachedData.twitterImage ? `<meta name="twitter:image" content="${cachedData.twitterImage}">` : ''}
-  ${cachedData.twitterTitle ? `<meta name="twitter:title" content="${cachedData.twitterTitle}">` : ''}
-  ${cachedData.twitterDescription ? `<meta name="twitter:description" content="${cachedData.twitterDescription}">` : ''}
-
-  <!-- Standard meta tags -->
-  <meta name="description" content="${cachedData.description || ''}">
-
-  <!-- No redirect needed for crawlers -->
-</head>
-<body>
-  <h1>${cachedData.title || 'Loading...'}</h1>
-  <p>${cachedData.description || 'Open Graph data loaded from cache'}</p>
-
-  <!-- Debug info (hidden) -->
-  <!-- Cached data -->
-</body>
-</html>`;
-        return new Response(htmlContent, {
-          headers: {
-            "content-type": "text/html;charset=UTF-8",
-            "cache-control": "public, max-age=3600", // 1 hour for cached data
-          },
-        });
       }
-    }
-
-    // No cache hit, proceed with browser rendering
-    // Pick random session from open sessions
-    let sessionId = await this.getRandomSession(env.MYBROWSER);
-    let browser, launched;
-    if (sessionId) {
+      
+      let reqUrl: string;
       try {
-        browser = await puppeteer.connect(env.MYBROWSER, sessionId);
-      } catch (e) {
-        // another worker may have connected first
-        console.log(`Failed to connect to ${sessionId}. Error ${e}`);
-      }
-    }
-    if (!browser) {
-      // No open sessions, launch new session
-      browser = await puppeteer.launch(env.MYBROWSER);
-      launched = true;
-    }
-
-    sessionId = browser.sessionId(); // get current session id
-
-    // Do your work here
-    const page = await browser.newPage();
-
-    try {
-      // Set timeout and User-Agent for better compatibility
-      await page.setDefaultTimeout(15000);
-      await page.setUserAgent('Mozilla/5.0 (compatible; OGBot/1.0; +https://ogbot.com)');
-      const response = await page.goto(reqUrl, { waitUntil: 'networkidle2' });
-
-      // Additional wait for dynamic content to load
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      if (!response) {
-        throw new Error('Failed to load page: No response received');
+        // Decode the URL in case it's URL-encoded
+        reqUrl = decodeURIComponent(targetUrl);
+        // Validate and normalize the URL
+        reqUrl = new URL(reqUrl).toString();
+      } catch (error) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: "Invalid URL format",
+          }),
+          {
+            status: 400,
+            headers: {
+              "content-type": "application/json",
+              "access-control-allow-origin": "*",
+            },
+          },
+        );
       }
 
-      // Accept 2xx and 3xx status codes (including 304 Not Modified)
-      const status = response.status();
-      if (status >= 400) {
-        throw new Error(`Failed to load page: ${status}`);
-      }
+      // Generate cache key based on URL
+      const cacheKey = `html:${btoa(reqUrl).replace(/[^a-zA-Z0-9]/g, '')}`;
 
-      // Extract Open Graph meta data using a simple approach
-      const ogData: any = await page.evaluate(`
-        (function() {
-          const result = {};
-
-          // Helper function to get meta content
-          const getMeta = function(prop) {
-            const el = document.querySelector('meta[property="' + prop + '"]') ||
-                       document.querySelector('meta[name="' + prop + '"]');
-            return el ? el.getAttribute('content') : null;
-          };
-
-          // Extract OG data
-          result.title = getMeta('og:title') || document.title || null;
-          result.description = getMeta('og:description') || getMeta('description') || null;
-          result.image = getMeta('og:image') || null;
-          result.url = getMeta('og:url') || window.location.href;
-          result.type = getMeta('og:type') || 'website';
-          result.siteName = getMeta('og:site_name') || null;
-          result.locale = getMeta('og:locale') || null;
-
-          // Facebook app_id
-          result.fbAppId = getMeta('fb:app_id') || null;
-
-          // Twitter meta data
-          result.twitterCard = getMeta('twitter:card') || null;
-          result.twitterImage = getMeta('twitter:image') || null;
-          result.twitterTitle = getMeta('twitter:title') || null;
-          result.twitterDescription = getMeta('twitter:description') || null;
-
-          return result;
-        })()
-      `);
-
-      // All work done, so free connection (IMPORTANT!)
-      browser.disconnect();
-
-      // Cache the extracted OG data (if KV is available)
-      if (env.OG_CACHE) {
+      // Check cache first (if KV is available)
+      if (env.HTML_CACHE) {
         try {
-          await env.OG_CACHE.put(cacheKey, JSON.stringify(ogData), {
-            expirationTtl: 3600, // Cache for 1 hour
-          });
-          console.log(`Cached OG data for ${reqUrl}`);
+          const cached = await env.HTML_CACHE.get(cacheKey);
+          if (cached) {
+            console.log(`Cache hit for ${reqUrl}`);
+            return new Response(cached, {
+              headers: {
+                "content-type": "text/html;charset=UTF-8",
+                "access-control-allow-origin": "*",
+                "cache-control": "public, max-age=3600", // 1 hour for cached data
+              },
+            });
+          }
         } catch (e) {
-          console.log(`Cache write error: ${e}`);
+          console.log(`Cache read error: ${e}`);
         }
       }
 
-      // Check if request wants JSON (for debugging) or HTML (for Facebook)
-      const acceptHeader = request.headers.get('accept') || '';
-      const wantsJson = acceptHeader.includes('application/json') || url.searchParams.get('format') === 'json';
+      let browser;
+      let sessionId;
+      let launched = false;
+      let sessionInfo: SessionInfo | null = null;
 
-      if (wantsJson) {
-        // Return JSON for debugging/API usage
-        return new Response(
-          JSON.stringify({
-            success: true,
-            url: reqUrl,
-            sessionInfo: `${launched ? "Launched" : "Connected to"} ${sessionId}`,
-            data: ogData
-          }, null, 2),
-          {
-            headers: {
-              "content-type": "application/json",
-              "access-control-allow-origin": "*",
-              "access-control-allow-methods": "GET, POST, OPTIONS",
-              "access-control-allow-headers": "Content-Type",
-            },
-          },
-        );
-      } else {
-        // Return HTML with OG meta tags for Facebook crawler
-        const htmlContent = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>${ogData.title || 'Page Title'}</title>
+      try {
+        const endpoint = env.MYBROWSER;
+        
+        // Try to get an existing session first
+        sessionInfo = await this.getOptimalSession(endpoint);
+        
+        if (sessionInfo) {
+          sessionId = sessionInfo.sessionId;
+          browser = await puppeteer.connect(endpoint, sessionId);
+          console.log(`Reusing session: ${sessionId}`);
+        } else {
+          // Launch new browser if no session available
+          browser = await puppeteer.launch(endpoint);
+          launched = true;
+          console.log('Launched new browser session');
+        }
 
-  <!-- Facebook App ID -->
-  ${ogData.fbAppId ? `<meta property="fb:app_id" content="${ogData.fbAppId}">` : ''}
-
-  <!-- Open Graph meta tags -->
-  <meta property="og:title" content="${ogData.title || ''}">
-  <meta property="og:description" content="${ogData.description || ''}">
-  <meta property="og:image" content="${ogData.image || ''}">
-  <meta property="og:url" content="${reqUrl}">
-  <meta property="og:type" content="${ogData.type || 'website'}">
-  ${ogData.siteName ? `<meta property="og:site_name" content="${ogData.siteName}">` : ''}
-  ${ogData.locale ? `<meta property="og:locale" content="${ogData.locale}">` : ''}
-
-  <!-- Twitter Card meta tags -->
-  ${ogData.twitterCard ? `<meta name="twitter:card" content="${ogData.twitterCard}">` : ''}
-  ${ogData.twitterImage ? `<meta name="twitter:image" content="${ogData.twitterImage}">` : ''}
-  ${ogData.twitterTitle ? `<meta name="twitter:title" content="${ogData.twitterTitle}">` : ''}
-  ${ogData.twitterDescription ? `<meta name="twitter:description" content="${ogData.twitterDescription}">` : ''}
-
-  <!-- Standard meta tags -->
-  <meta name="description" content="${ogData.description || ''}">
-
-  <!-- No redirect needed for crawlers -->
-</head>
-<body>
-  <h1>${ogData.title || 'Loading...'}</h1>
-  <p>${ogData.description || 'Open Graph data extracted successfully'}</p>
-
-  <!-- Debug info (hidden) -->
-  <!-- Session: ${sessionId} -->
-</body>
-</html>`;
-
+        const page = await browser.newPage();
+        
+        // Optimize page settings for faster loading
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+          // Block unnecessary resources to speed up loading
+          if (req.resourceType() === 'stylesheet' || 
+              req.resourceType() === 'font' || 
+              req.resourceType() === 'image') {
+            req.abort();
+          } else {
+            req.continue();
+          }
+        });
+        
+        // Navigate with optimized settings
+        await page.goto(reqUrl, { 
+          waitUntil: 'domcontentloaded', // Faster than networkidle0
+          timeout: 15000 // Reduced timeout
+        });
+        
+        // Wait for meta tags to be rendered (shorter wait)
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Get the full HTML content after rendering
+        const htmlContent = await page.content();
+        
+        // Close the page but keep session alive for reuse
+        await page.close();
+        
+        // Don't disconnect if we're reusing the session
+        if (launched) {
+          // For new sessions, keep them alive for reuse
+          const newSessionId = (browser as any).sessionId;
+          if (newSessionId) {
+            sessionCache.set(newSessionId, {
+              sessionId: newSessionId,
+              lastUsed: Date.now(),
+              inUse: false
+            });
+          }
+          browser.disconnect();
+        } else if (sessionInfo) {
+          // Mark session as available for reuse
+          sessionInfo.inUse = false;
+          sessionInfo.lastUsed = Date.now();
+        }
+        
+        // Cache the HTML content (if KV is available)
+        if (env.HTML_CACHE) {
+          try {
+            await env.HTML_CACHE.put(cacheKey, htmlContent, {
+              expirationTtl: 3600, // Cache for 1 hour
+            });
+            console.log(`Cached HTML for ${reqUrl}`);
+          } catch (e) {
+            console.log(`Cache write error: ${e}`);
+          }
+        }
+        
+        // Return the raw HTML content
         return new Response(htmlContent, {
           headers: {
             "content-type": "text/html;charset=UTF-8",
-            "cache-control": "public, max-age=300", // Cache for 5 minutes
+            "access-control-allow-origin": "*",
           },
         });
-      }
-    } catch (error) {
-      // Make sure to disconnect browser even on error
-      browser.disconnect();
+      } catch (error) {
+        // Make sure to handle browser cleanup on error
+        if (browser) {
+          if (sessionInfo) {
+            // Mark session as available again
+            sessionInfo.inUse = false;
+          }
+          if (launched) {
+            browser.disconnect();
+          }
+        }
 
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            url: reqUrl,
+          }),
+          {
+            status: 500,
+            headers: {
+              "content-type": "application/json",
+              "access-control-allow-origin": "*",
+            },
+          },
+        );
+      }
+    } else {
+      // For non-GET /content requests, return method not allowed
       return new Response(
         JSON.stringify({
           success: false,
-          error: error instanceof Error ? error.message : 'Unknown error',
-          url: reqUrl,
-          sessionInfo: `${launched ? "Launched" : "Connected to"} ${sessionId}`,
-        }, null, 2),
+          error: "Only GET requests to /content/{target_url} are supported",
+        }),
         {
-          status: 500,
+          status: 405,
           headers: {
             "content-type": "application/json",
             "access-control-allow-origin": "*",
@@ -279,26 +230,74 @@ export default {
     }
   },
 
-  // Pick random free session
-  // Other custom logic could be used instead
-  async getRandomSession(endpoint: puppeteer.BrowserWorker): Promise<string | undefined> {
-    const sessions: puppeteer.ActiveSession[] =
-      await puppeteer.sessions(endpoint);
-    console.log(`Sessions: ${JSON.stringify(sessions)}`);
-    const sessionsIds = sessions
-      .filter((v) => {
-        return !v.connectionId; // remove sessions with workers connected to them
-      })
-      .map((v) => {
-        return v.sessionId;
+  // Get optimal session with improved caching and management
+  async getOptimalSession(endpoint: any): Promise<SessionInfo | null> {
+    // Clean up expired sessions from cache
+    const now = Date.now();
+    for (const [sessionId, info] of sessionCache.entries()) {
+      if (now - info.lastUsed > SESSION_TIMEOUT) {
+        sessionCache.delete(sessionId);
+      }
+    }
+
+    // Try to find an available cached session first
+    for (const [sessionId, info] of sessionCache.entries()) {
+      if (!info.inUse) {
+        info.inUse = true;
+        return info;
+      }
+    }
+
+    // If no cached session available, get sessions from Cloudflare
+    try {
+      const sessions: any[] = await puppeteer.sessions(endpoint);
+      console.log(`Available sessions: ${sessions.length}`);
+      
+      const availableSessions = sessions.filter((v) => {
+        return !v.connectionId && !sessionCache.has(v.sessionId);
       });
-    if (sessionsIds.length === 0) {
+
+      if (availableSessions.length > 0) {
+        // Pick the most recently created session for better performance
+        const selectedSession = availableSessions[0];
+        const sessionInfo: SessionInfo = {
+          sessionId: selectedSession.sessionId,
+          lastUsed: now,
+          inUse: true
+        };
+        
+        sessionCache.set(selectedSession.sessionId, sessionInfo);
+        return sessionInfo;
+      }
+    } catch (error) {
+      console.log(`Error getting sessions: ${error}`);
+    }
+
+    return null;
+  },
+
+  // Warm up sessions for better performance
+  async warmupSessions(endpoint: any): Promise<void> {
+    if (sessionCache.size >= MAX_SESSIONS) {
       return;
     }
 
-    const sessionId =
-      sessionsIds[Math.floor(Math.random() * sessionsIds.length)];
-
-    return sessionId!;
+    try {
+      const browser = await puppeteer.launch(endpoint);
+      const sessionId = (browser as any).sessionId;
+      
+      if (sessionId) {
+        sessionCache.set(sessionId, {
+          sessionId,
+          lastUsed: Date.now(),
+          inUse: false
+        });
+        console.log(`Warmed up session: ${sessionId}`);
+      }
+      
+      browser.disconnect();
+    } catch (error) {
+      console.log(`Session warmup failed: ${error}`);
+    }
   },
 };
